@@ -1,0 +1,35 @@
+send_anonymous_usage_stats: true
+project_id: "tap-yandex-appmetrica"
+default_environment: test
+requires_meltano: ">=3.9.1"
+environments:
+- name: test
+plugins:
+  extractors:
+  - name: "tap-yandex-appmetrica"
+    namespace: "tap_yandex_appmetrica"
+    pip_url: -e .
+    capabilities:
+    - state
+    - catalog
+    - discover
+    - about
+    - stream-maps
+    - structured-logging
+
+    settings:
+    - name: application_id
+    - name: token
+      kind: password
+    - name: start_date
+    - name: retro_interval_days
+
+    select:
+    - "events.*"
+    - "installations.*"
+    - "install_devices.*"
+
+  loaders:
+  - name: target-jsonl
+    variant: andyh1203
+    pip_url: target-jsonl
