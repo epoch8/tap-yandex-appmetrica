@@ -183,8 +183,9 @@ class InstallDevicesStream(YandexAppmetricaStatStream):
 
 class DeeplinkStream(YandexAppmetricaStream):
     name = "deeplink"
-    path = "/logs/v1/export/deeplinks.json"
-    records_jsonpath = "$.data[*]"
+    # path = "/logs/v1/export/deeplinks.json"
+    path = "/logs/v1/export/deeplinks.csv"
+    # records_jsonpath = "$.data[*]"
 
     primary_keys = ["session_id"]
     replication_key = "event_datetime"
@@ -268,6 +269,16 @@ class DeeplinkStream(YandexAppmetricaStream):
         th.Property("app_package_name", th.StringType),
         th.Property("app_version_name", th.StringType),
     ).to_dict()
+
+    def parse_response(self, response: requests.Response) -> Iterable[dict]:
+        response.encoding = 'utf-8'
+        reader = csv.DictReader(response.iter_lines(decode_unicode=True))
+        yield from (
+            obj
+            for obj in reader
+            if obj.get("event_datetime")
+            and is_valid_datetime(obj.get("event_datetime"))
+        )
 
     def post_process(
         self,
