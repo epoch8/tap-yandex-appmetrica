@@ -22,12 +22,19 @@ plugins:
     - name: token
       kind: password
     - name: start_date
+    - name: chunk_days
+    - name: limit
     - name: retro_interval_days
 
     select:
     - "events.*"
     - "installations.*"
     - "install_devices.*"
+    - "deeplink.*"
+
+    config:
+      chunk_days: 1
+      retro_interval_days: 1
 
   loaders:
   - name: target-jsonl
