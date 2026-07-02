@@ -5,7 +5,6 @@ from __future__ import annotations
 import ctypes
 import decimal
 import gc
-import resource
 import sys
 import csv
 from typing import TYPE_CHECKING, Any, ClassVar, Callable, Iterable, Generator
@@ -68,6 +67,24 @@ def _release_memory_to_os() -> None:
     gc.collect()
     if _libc is not None:
         _libc.malloc_trim(0)
+
+
+def _current_rss_mb() -> float | None:
+    """Return this process's *current* resident set size, in MB.
+
+    Unlike ``resource.getrusage().ru_maxrss`` (a high-water mark that only
+    ever increases for the life of the process), this reflects memory used
+    at the moment it's read, which is what's actually needed to tell a real
+    accumulation apart from a large-but-transient per-chunk peak.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        return None
+    return None
 
 
 class YandexAppmetricaStream(RESTStream):
@@ -141,8 +158,19 @@ class YandexAppmetricaStream(RESTStream):
                 resp = decorated_request(prepared_request, context)
                 request_counter.increment()
                 self.update_sync_costs(prepared_request, resp, context)
+                row_count = 0
                 try:
-                    yield from self.parse_response(resp)
+                    for record in self.parse_response(resp):
+                        row_count += 1
+                        if row_count % 50_000 == 0:
+                            self.logger.info(
+                                "'%s': %d rows into chunk starting %s, current RSS=%s MB",
+                                self.name,
+                                row_count,
+                                page_date.isoformat(),
+                                _current_rss_mb(),
+                            )
+                        yield record
                 finally:
                     resp.close()
 
@@ -150,12 +178,12 @@ class YandexAppmetricaStream(RESTStream):
                 self._write_state_message()
                 page_date += datetime.timedelta(days=self.config["chunk_days"])
                 _release_memory_to_os()
-                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
                 self.logger.info(
-                    "Chunk done for '%s': date_until=%s, peak RSS so far=%.1f MB",
+                    "Chunk done for '%s': date_until=%s, rows=%d, current RSS=%s MB",
                     self.name,
                     page_date.isoformat(),
-                    rss_mb,
+                    row_count,
+                    _current_rss_mb(),
                 )
 
     def get_url_params(
