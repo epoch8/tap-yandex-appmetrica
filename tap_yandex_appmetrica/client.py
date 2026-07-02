@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import decimal
+import gc
+import resource
 import sys
 import csv
 from typing import TYPE_CHECKING, Any, ClassVar, Callable, Iterable, Generator
@@ -42,6 +45,29 @@ _Auth = Callable[[requests.PreparedRequest], requests.PreparedRequest]
 
 # See https://stackoverflow.com/questions/15063936/csv-error-field-larger-than-field-limit-131072
 csv.field_size_limit(sys.maxsize)
+
+_libc = None
+if sys.platform.startswith("linux"):
+    try:
+        _libc = ctypes.CDLL("libc.so.6")
+    except OSError:
+        _libc = None
+
+
+def _release_memory_to_os() -> None:
+    """Return freed heap memory to the OS after a chunk finishes.
+
+    Chunked, high-churn CSV parsing (millions of short-lived row dicts per
+    date-chunk) tends to leave glibc's allocator holding onto freed memory
+    as fragmented arenas rather than releasing it back to the OS. In a
+    memory-limited container that shows up as RSS creeping up across many
+    chunks in a single run until it gets OOMKilled, even though no Python
+    objects are actually leaking. Forcing a GC pass plus malloc_trim at
+    each chunk boundary keeps peak RSS closer to a single chunk's size.
+    """
+    gc.collect()
+    if _libc is not None:
+        _libc.malloc_trim(0)
 
 
 class YandexAppmetricaStream(RESTStream):
@@ -115,11 +141,22 @@ class YandexAppmetricaStream(RESTStream):
                 resp = decorated_request(prepared_request, context)
                 request_counter.increment()
                 self.update_sync_costs(prepared_request, resp, context)
-                yield from self.parse_response(resp)
+                try:
+                    yield from self.parse_response(resp)
+                finally:
+                    resp.close()
 
                 self.finalize_state_progress_markers()
                 self._write_state_message()
                 page_date += datetime.timedelta(days=self.config["chunk_days"])
+                _release_memory_to_os()
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                self.logger.info(
+                    "Chunk done for '%s': date_until=%s, peak RSS so far=%.1f MB",
+                    self.name,
+                    page_date.isoformat(),
+                    rss_mb,
+                )
 
     def get_url_params(
         self,
