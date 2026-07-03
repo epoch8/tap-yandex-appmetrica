@@ -81,7 +81,7 @@ def _current_rss_mb() -> float | None:
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024
+                    return round(int(line.split()[1]) / 1024, 1)
     except OSError:
         return None
     return None
