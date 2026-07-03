@@ -121,13 +121,14 @@ class YandexAppmetricaStream(RESTStream):
     def _chunk_interval(self) -> datetime.timedelta:
         """Return the date_since/date_until window size for one HTTP request.
 
-        Normally a ``chunk_days``-sized window. If ``split_hours`` is enabled,
-        that same backlog is instead walked in 1-hour windows, so a single
-        HTTP request (and the per-chunk memory it holds) never covers more
-        than an hour's worth of rows, no matter how large daily volume gets.
+        If ``chunk_hours`` is set, it takes precedence over ``chunk_days`` and
+        the backlog is walked in windows of that many hours instead — lets a
+        deployment tune the tradeoff between per-request memory (smaller
+        windows) and request/backoff overhead (larger windows) for streams
+        whose daily volume is too large for a full day per request.
         """
-        if self.config.get("split_hours", False):
-            return datetime.timedelta(hours=1)
+        if (chunk_hours := self.config.get("chunk_hours")) is not None:
+            return datetime.timedelta(hours=chunk_hours)
         return datetime.timedelta(days=self.config["chunk_days"])
 
     @property
@@ -156,11 +157,11 @@ class YandexAppmetricaStream(RESTStream):
             page_date = page_date.set(hour=0, minute=0, second=0, microsecond=0)
 
         chunk_interval = self._chunk_interval()
-        if self.config.get("split_hours", False):
+        if self.config.get("chunk_hours") is not None:
             # State (and the date_since/date_until windows built from it) must
-            # stay hour-truncated so hourly windows never drift off clean hour
-            # boundaries because of a sub-hour bookmark value carried over
-            # from an exact record timestamp.
+            # stay hour-truncated so hour-sized windows never drift off clean
+            # hour boundaries because of a sub-hour bookmark value carried
+            # over from an exact record timestamp.
             page_date = page_date.set(minute=0, second=0, microsecond=0)
 
         decorated_request = self.request_decorator(self._request)

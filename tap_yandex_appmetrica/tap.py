@@ -44,18 +44,18 @@ class TapYandexAppmetrica(Tap):
         th.Property(
             "chunk_days",
             th.IntegerType,
-            default=30,
+            default=1,
         ),
         th.Property(
-            "split_hours",
-            th.BooleanType,
-            default=False,
+            "chunk_hours",
+            th.IntegerType,
             description=(
-                "If true, walk the backlog in 1-hour windows instead of "
-                "chunk_days-sized windows, so a single request never covers "
-                "more rows than an hour's worth regardless of daily volume. "
-                "Only affects log-export streams (events, installations, "
-                "deeplink)."
+                "If set, walk the backlog in windows of this many hours "
+                "instead of chunk_days-sized windows (chunk_days is ignored "
+                "when this is set), so a single request can be tuned to "
+                "cover less than a full day's rows when daily volume is too "
+                "large. Only affects log-export streams (events, "
+                "installations, deeplink)."
             ),
         ),
         th.Property(
