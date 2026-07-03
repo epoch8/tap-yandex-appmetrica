@@ -118,6 +118,18 @@ class YandexAppmetricaStream(RESTStream):
     def backoff_max_tries(self) -> int:
         return 100
 
+    def _chunk_interval(self) -> datetime.timedelta:
+        """Return the date_since/date_until window size for one HTTP request.
+
+        Normally a ``chunk_days``-sized window. If ``split_hours`` is enabled,
+        that same backlog is instead walked in 1-hour windows, so a single
+        HTTP request (and the per-chunk memory it holds) never covers more
+        than an hour's worth of rows, no matter how large daily volume gets.
+        """
+        if self.config.get("split_hours", False):
+            return datetime.timedelta(hours=1)
+        return datetime.timedelta(days=self.config["chunk_days"])
+
     @property
     def requests_session(self) -> requests.Session:
         if not self._requests_session:
@@ -142,6 +154,14 @@ class YandexAppmetricaStream(RESTStream):
         if (retro_interval_days := self.config.get("retro_interval_days")) != 0:
             page_date = page_date.subtract(days=retro_interval_days)
             page_date = page_date.set(hour=0, minute=0, second=0, microsecond=0)
+
+        chunk_interval = self._chunk_interval()
+        if self.config.get("split_hours", False):
+            # State (and the date_since/date_until windows built from it) must
+            # stay hour-truncated so hourly windows never drift off clean hour
+            # boundaries because of a sub-hour bookmark value carried over
+            # from an exact record timestamp.
+            page_date = page_date.set(minute=0, second=0, microsecond=0)
 
         decorated_request = self.request_decorator(self._request)
 
@@ -176,7 +196,7 @@ class YandexAppmetricaStream(RESTStream):
 
                 self.finalize_state_progress_markers()
                 self._write_state_message()
-                page_date += datetime.timedelta(days=self.config["chunk_days"])
+                page_date += chunk_interval
                 _release_memory_to_os()
                 self.logger.info(
                     "Chunk done for '%s': date_until=%s, rows=%d, current RSS=%s MB",
@@ -209,7 +229,7 @@ class YandexAppmetricaStream(RESTStream):
         params["date_dimension"] = "receive"
         params["date_since"] = next_page_token.strftime("%Y-%m-%d %H:%M:%S")
         params["date_until"] = (
-            next_page_token + datetime.timedelta(days=self.config["chunk_days"])
+            next_page_token + self._chunk_interval()
         ).strftime("%Y-%m-%d %H:%M:%S")
 
         if (limit := self.config.get("limit")) is not None:

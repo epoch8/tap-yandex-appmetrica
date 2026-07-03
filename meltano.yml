@@ -23,6 +23,7 @@ plugins:
       kind: password
     - name: start_date
     - name: chunk_days
+    - name: split_hours
     - name: limit
     - name: retro_interval_days
 
