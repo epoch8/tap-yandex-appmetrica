@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import decimal
+import gc
 import sys
 import csv
 from typing import TYPE_CHECKING, Any, ClassVar, Callable, Iterable, Generator
@@ -25,10 +27,10 @@ from tap_yandex_appmetrica import schemas
 
 if sys.version_info >= (3, 12):
     from typing import override
-    from cached_property import cached_property
 else:
     from typing_extensions import override
-    from functools import cached_property
+
+from functools import cached_property
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -42,6 +44,47 @@ _Auth = Callable[[requests.PreparedRequest], requests.PreparedRequest]
 
 # See https://stackoverflow.com/questions/15063936/csv-error-field-larger-than-field-limit-131072
 csv.field_size_limit(sys.maxsize)
+
+_libc = None
+if sys.platform.startswith("linux"):
+    try:
+        _libc = ctypes.CDLL("libc.so.6")
+    except OSError:
+        _libc = None
+
+
+def _release_memory_to_os() -> None:
+    """Return freed heap memory to the OS after a chunk finishes.
+
+    Chunked, high-churn CSV parsing (millions of short-lived row dicts per
+    date-chunk) tends to leave glibc's allocator holding onto freed memory
+    as fragmented arenas rather than releasing it back to the OS. In a
+    memory-limited container that shows up as RSS creeping up across many
+    chunks in a single run until it gets OOMKilled, even though no Python
+    objects are actually leaking. Forcing a GC pass plus malloc_trim at
+    each chunk boundary keeps peak RSS closer to a single chunk's size.
+    """
+    gc.collect()
+    if _libc is not None:
+        _libc.malloc_trim(0)
+
+
+def _current_rss_mb() -> float | None:
+    """Return this process's *current* resident set size, in MB.
+
+    Unlike ``resource.getrusage().ru_maxrss`` (a high-water mark that only
+    ever increases for the life of the process), this reflects memory used
+    at the moment it's read, which is what's actually needed to tell a real
+    accumulation apart from a large-but-transient per-chunk peak.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        return None
+    return None
 
 
 class YandexAppmetricaStream(RESTStream):
@@ -75,6 +118,19 @@ class YandexAppmetricaStream(RESTStream):
     def backoff_max_tries(self) -> int:
         return 100
 
+    def _chunk_interval(self) -> datetime.timedelta:
+        """Return the date_since/date_until window size for one HTTP request.
+
+        If ``chunk_hours`` is set, it takes precedence over ``chunk_days`` and
+        the backlog is walked in windows of that many hours instead — lets a
+        deployment tune the tradeoff between per-request memory (smaller
+        windows) and request/backoff overhead (larger windows) for streams
+        whose daily volume is too large for a full day per request.
+        """
+        if (chunk_hours := self.config.get("chunk_hours")) is not None:
+            return datetime.timedelta(hours=chunk_hours)
+        return datetime.timedelta(days=self.config["chunk_days"])
+
     @property
     def requests_session(self) -> requests.Session:
         if not self._requests_session:
@@ -100,6 +156,14 @@ class YandexAppmetricaStream(RESTStream):
             page_date = page_date.subtract(days=retro_interval_days)
             page_date = page_date.set(hour=0, minute=0, second=0, microsecond=0)
 
+        chunk_interval = self._chunk_interval()
+        if self.config.get("chunk_hours") is not None:
+            # State (and the date_since/date_until windows built from it) must
+            # stay hour-truncated so hour-sized windows never drift off clean
+            # hour boundaries because of a sub-hour bookmark value carried
+            # over from an exact record timestamp.
+            page_date = page_date.set(minute=0, second=0, microsecond=0)
+
         decorated_request = self.request_decorator(self._request)
 
         now = utc_now()
@@ -115,11 +179,33 @@ class YandexAppmetricaStream(RESTStream):
                 resp = decorated_request(prepared_request, context)
                 request_counter.increment()
                 self.update_sync_costs(prepared_request, resp, context)
-                yield from self.parse_response(resp)
+                row_count = 0
+                try:
+                    for record in self.parse_response(resp):
+                        row_count += 1
+                        if row_count % 50_000 == 0:
+                            self.logger.info(
+                                "'%s': %d rows into chunk starting %s, current RSS=%s MB",
+                                self.name,
+                                row_count,
+                                page_date.isoformat(),
+                                _current_rss_mb(),
+                            )
+                        yield record
+                finally:
+                    resp.close()
 
                 self.finalize_state_progress_markers()
                 self._write_state_message()
-                page_date += datetime.timedelta(days=self.config["chunk_days"])
+                page_date += chunk_interval
+                _release_memory_to_os()
+                self.logger.info(
+                    "Chunk done for '%s': date_until=%s, rows=%d, current RSS=%s MB",
+                    self.name,
+                    page_date.isoformat(),
+                    row_count,
+                    _current_rss_mb(),
+                )
 
     def get_url_params(
         self,
@@ -144,7 +230,7 @@ class YandexAppmetricaStream(RESTStream):
         params["date_dimension"] = "receive"
         params["date_since"] = next_page_token.strftime("%Y-%m-%d %H:%M:%S")
         params["date_until"] = (
-            next_page_token + datetime.timedelta(days=self.config["chunk_days"])
+            next_page_token + self._chunk_interval()
         ).strftime("%Y-%m-%d %H:%M:%S")
 
         if (limit := self.config.get("limit")) is not None:

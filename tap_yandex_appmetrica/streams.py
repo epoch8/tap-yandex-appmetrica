@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import datetime
 import requests
 import pendulum
 from pendulum.exceptions import ParserError
@@ -13,14 +14,26 @@ from singer_sdk import typing as th  # JSON Schema typing helpers
 from tap_yandex_appmetrica.client import YandexAppmetricaStream
 from tap_yandex_appmetrica.client import YandexAppmetricaStatStream
 
+# The API consistently emits datetimes in this format. Trying it first with
+# the lightweight stdlib parser avoids constructing a full pendulum.DateTime
+# (and its timezone machinery) for every one of the millions of rows the
+# `events` stream can produce in a sync - pendulum.parse is only used as a
+# fallback for values that don't match.
+_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 def is_valid_datetime(date_string: str):
+    try:
+        datetime.datetime.strptime(date_string, _DATETIME_FORMAT)
+        return True
+    except ValueError:
+        pass
     try:
         pendulum.parse(date_string)
         return True
     except ParserError:
         return False
-    
+
 
 class EventsStream(YandexAppmetricaStream):
     name = "events"
