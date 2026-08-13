@@ -27,10 +27,10 @@ from tap_yandex_appmetrica import schemas
 
 if sys.version_info >= (3, 12):
     from typing import override
-    from cached_property import cached_property
 else:
     from typing_extensions import override
-    from functools import cached_property
+
+from functools import cached_property
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
