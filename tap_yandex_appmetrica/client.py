@@ -21,6 +21,7 @@ from singer_sdk.helpers.jsonpath import extract_jsonpath
 from singer_sdk.pagination import BaseAPIPaginator  # noqa: TC002
 from singer_sdk.streams import RESTStream
 from singer_sdk.authenticators import SimpleAuthenticator
+from singer_sdk.helpers._state import PROGRESS_MARKERS
 from singer_sdk.helpers._util import utc_now
 
 from tap_yandex_appmetrica import schemas
@@ -87,7 +88,57 @@ def _current_rss_mb() -> float | None:
     return None
 
 
-class YandexAppmetricaStream(RESTStream):
+def _is_older(candidate: Any, reference: Any) -> bool:
+    """Return True if ``candidate`` is strictly earlier than ``reference``.
+
+    Bookmarks are JSON strings in mixed shapes (``2026-10-06``,
+    ``2026-10-06 12:00:00``, ISO with ``T``), so compare as datetimes and only
+    fall back to plain comparison if parsing fails.
+    """
+    try:
+        return pendulum.parse(str(candidate)) < pendulum.parse(str(reference))
+    except (ValueError, TypeError):
+        return candidate < reference
+
+
+class _MonotonicBookmarkMixin:
+    """Never let a finalized bookmark move backwards.
+
+    With ``retro_interval_days`` the tap deliberately re-reads data older than
+    the bookmark. The SDK promotes the progress marker (the latest record seen
+    in this run) to the bookmark unconditionally, so a run that re-reads the
+    retro window and then fails (the API legitimately answers 202 for days)
+    would persist an older bookmark, and every following run would step
+    another ``retro_interval_days`` back, creating new report tasks each time.
+    Here the progress marker is raised to the existing bookmark first, so the
+    bookmark only ever grows.
+    """
+
+    def _clamp_progress_marker(self, state: dict) -> None:
+        markers = state.get(PROGRESS_MARKERS)
+        bookmark = state.get("replication_key_value")
+        if not markers or bookmark is None or "replication_key_value" not in markers:
+            return
+        if _is_older(markers["replication_key_value"], bookmark):
+            self.logger.info(
+                "'%s': keeping bookmark %s, newest record seen in this run is "
+                "older (%s); retro window re-read must not move state back",
+                self.name,
+                bookmark,
+                markers["replication_key_value"],
+            )
+            markers["replication_key_value"] = bookmark
+
+    def finalize_state_progress_markers(self, state: dict | None = None) -> None:
+        if state:
+            self._clamp_progress_marker(state)
+        elif self.selected:
+            for context in self.partitions or [{}]:
+                self._clamp_progress_marker(self.get_context_state(context or None))
+        super().finalize_state_progress_markers(state)
+
+
+class YandexAppmetricaStream(_MonotonicBookmarkMixin, RESTStream):
     """Appmetrica stream class."""
 
     _LOG_REQUEST_METRIC_URLS = True
@@ -245,7 +296,7 @@ class YandexAppmetricaStream(RESTStream):
         yield from reader
 
 
-class YandexAppmetricaStatStream(RESTStream):
+class YandexAppmetricaStatStream(_MonotonicBookmarkMixin, RESTStream):
     url_base = "https://api.appmetrica.yandex.ru/stat/v1/data"
     records_jsonpath = "$.data[*]"
 
