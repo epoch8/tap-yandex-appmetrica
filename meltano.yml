@@ -32,7 +32,9 @@ plugins:
     - "installations.*"
     - "install_devices.*"
     - "deeplink.*"
-
+    - "stream_deeplink.*"
+    - "stream_events.*"
+    - "stream_installations.*"
     config:
       chunk_days: 1
       retro_interval_days: 1

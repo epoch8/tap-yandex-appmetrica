@@ -81,6 +81,12 @@ class TapYandexAppmetrica(Tap):
             streams.InstallationsStream(self),
             streams.InstallDevicesStream(self),
             streams.DeeplinkStream(self),
+            streams.StreamStatusDeeplinkStream(self),
+            streams.StreamDeeplinkStream(self),
+            streams.StreamStatusEventsStream(self),
+            streams.StreamEventsStream(self),
+            streams.StreamStatusInstallationsStream(self),
+            streams.StreamInstallationsStream(self),
         ]
 
 

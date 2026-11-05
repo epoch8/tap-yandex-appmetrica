@@ -10,9 +10,11 @@ from pendulum.exceptions import ParserError
 from typing import Iterable
 
 from singer_sdk import typing as th  # JSON Schema typing helpers
+from singer_sdk.helpers.jsonpath import extract_jsonpath
 
 from tap_yandex_appmetrica.client import YandexAppmetricaStream
 from tap_yandex_appmetrica.client import YandexAppmetricaStatStream
+from tap_yandex_appmetrica.client import YandexAppmetricaDatastreamStream
 
 # The API consistently emits datetimes in this format. Trying it first with
 # the lightweight stdlib parser avoids constructing a full pendulum.DateTime
@@ -309,4 +311,295 @@ class DeeplinkStream(YandexAppmetricaStream):
         row["mcc"] = int(row["mcc"])
         row["mnc"] = int(row["mnc"])
         row["app_build_number"] = int(row["app_build_number"])
+        return row
+
+
+class StreamStatusStream(YandexAppmetricaDatastreamStream):
+    name = "streams_status"
+    path = "status"
+    stream = ""
+    primary_keys = ["stream_window_timestamp"]
+    replication_key = "stream_window_timestamp"
+
+    @property
+    def records_jsonpath(self) -> str:
+        return f"$.status.streams[?(@.data_type == '{self.stream}')].stream_windows[*]"
+
+    fields = [
+        "stream_window_timestamp",
+        "update_timestamp",
+    ]
+
+    schema = th.PropertiesList(
+        th.Property("stream_window_timestamp", th.IntegerType),
+        th.Property("update_timestamp", th.IntegerType),
+    ).to_dict()
+
+    def parse_response(self, response: requests.Response) -> Iterable[dict]:
+        for stream_windows in extract_jsonpath(self.records_jsonpath, input=response.json()):
+            yield {
+                "stream_window_timestamp": stream_windows["stream_window_timestamp"],
+                "update_timestamp": stream_windows["update_timestamp"],
+            }
+
+    def get_child_context(self, record: dict, context: Optional[dict]) -> dict:
+        """Return a context dictionary for child streams."""
+        for child in self.child_streams:
+            if not child.selected:
+                continue
+            bookmark = child.stream_state.get("replication_key_value")
+            if bookmark is not None and record["update_timestamp"] < bookmark - 300:
+                continue
+            return {
+                "stream": self.stream,
+                "stream_window_timestamp": record["stream_window_timestamp"],
+            }
+        return None
+
+
+class StreamStatusDeeplinkStream(StreamStatusStream):
+    name = "stream_status_deeplink"
+    stream = "deeplink"
+
+
+class StreamDeeplinkStream(YandexAppmetricaDatastreamStream):
+    name = "stream_deeplink"
+    parent_stream_type = StreamStatusDeeplinkStream
+    ignore_parent_replication_key = False
+    state_partitioning_keys = []
+    replication_key = "stream_window_timestamp"
+    path = "data?data_type={stream}&stream_window_timestamp={stream_window_timestamp}"
+    records_jsonpath = "$.data[*]"
+
+    fields = [
+        "deeplink_url_host",
+        "deeplink_url_parameters",
+        "deeplink_url_path",
+        "deeplink_url_scheme",
+        "event_datetime",
+        "event_receive_datetime",
+        "event_receive_timestamp",
+        "event_timestamp",
+        "is_reengagement",
+        "profile_id",
+        "publisher_id",
+        "publisher_name",
+        "session_id",
+        "tracker_name",
+        "tracking_id",
+        "android_id",
+        "appmetrica_device_id",
+        "appmetrica_sdk_version",
+        "city",
+        "connection_type",
+        "country_iso_code",
+        "device_ipv6",
+        "device_locale",
+        "device_manufacturer",
+        "device_model",
+        "device_type",
+        "google_aid",
+        "ios_ifa",
+        "ios_ifv",
+        "mcc",
+        "mnc",
+        "original_device_model",
+        "os_version",
+        "windows_aid",
+        "app_build_number",
+        "app_package_name",
+        "app_version_name",
+        "stream_window_timestamp",
+    ]
+
+    schema = th.PropertiesList(
+        th.Property("deeplink_url_host", th.StringType),
+        th.Property("deeplink_url_parameters", th.StringType),
+        th.Property("deeplink_url_path", th.StringType),
+        th.Property("deeplink_url_scheme", th.StringType),
+        th.Property("event_datetime", th.StringType),
+        th.Property("event_receive_datetime", th.StringType),
+        th.Property("event_receive_timestamp", th.IntegerType),
+        th.Property("event_timestamp", th.IntegerType),
+        th.Property("is_reengagement", th.BooleanType),
+        th.Property("profile_id", th.StringType),
+        th.Property("publisher_id", th.IntegerType),
+        th.Property("publisher_name", th.StringType),
+        th.Property("session_id", th.IntegerType),
+        th.Property("tracker_name", th.StringType),
+        th.Property("tracking_id", th.IntegerType),
+        th.Property("android_id", th.StringType),
+        th.Property("appmetrica_device_id", th.IntegerType),
+        th.Property("appmetrica_sdk_version", th.StringType),
+        th.Property("city", th.StringType),
+        th.Property("connection_type", th.StringType),
+        th.Property("country_iso_code", th.StringType),
+        th.Property("device_ipv6", th.StringType),
+        th.Property("device_locale", th.StringType),
+        th.Property("device_manufacturer", th.StringType),
+        th.Property("device_model", th.StringType),
+        th.Property("device_type", th.StringType),
+        th.Property("google_aid", th.StringType),
+        th.Property("ios_ifa", th.StringType),
+        th.Property("ios_ifv", th.StringType),
+        th.Property("mcc", th.IntegerType),
+        th.Property("mnc", th.IntegerType),
+        th.Property("original_device_model", th.StringType),
+        th.Property("os_version", th.StringType),
+        th.Property("windows_aid", th.StringType),
+        th.Property("app_build_number", th.IntegerType),
+        th.Property("app_package_name", th.StringType),
+        th.Property("app_version_name", th.StringType),
+        th.Property("stream_window_timestamp", th.IntegerType),
+    ).to_dict()
+
+    def post_process(
+        self,
+        row: dict,
+        context: dict | None = None,
+    ) -> dict | None:
+        row["is_reengagement"] = row["is_reengagement"] == "true"
+        row["event_receive_timestamp"] = int(row["event_receive_timestamp"])
+        row["event_timestamp"] = int(row["event_timestamp"])
+        row["publisher_id"] = int(row["publisher_id"])
+        row["session_id"] = int(row["session_id"])
+        row["tracking_id"] = int(row["tracking_id"])
+        row["appmetrica_device_id"] = int(row["appmetrica_device_id"])
+        row["mcc"] = int(row["mcc"])
+        row["mnc"] = int(row["mnc"])
+        row["app_build_number"] = int(row["app_build_number"])
+        row["stream_window_timestamp"] = int(context["stream_window_timestamp"])
+        return row
+
+
+class StreamStatusEventsStream(StreamStatusStream):
+    name = "stream_status_events"
+    stream = "event"
+
+
+class StreamEventsStream(YandexAppmetricaDatastreamStream):
+    name = "stream_events"
+    parent_stream_type = StreamStatusEventsStream
+    ignore_parent_replication_key = False
+    state_partitioning_keys = []
+    replication_key = "stream_window_timestamp"
+    path = "data?data_type={stream}&stream_window_timestamp={stream_window_timestamp}"
+    records_jsonpath = "$.data[*]"
+
+    fields = (
+        "event_datetime",
+        "event_json",
+        "event_name",
+        "event_receive_datetime",
+        "event_receive_timestamp",
+        "event_timestamp",
+        "session_id",
+        "installation_id",
+        "appmetrica_device_id",
+        "city",
+        "connection_type",
+        "country_iso_code",
+        "device_ipv6",
+        "device_locale",
+        "device_manufacturer",
+        "device_model",
+        "device_type",
+        "google_aid",
+        "ios_ifa",
+        "ios_ifv",
+        "mcc",
+        "mnc",
+        "operator_name",
+        "original_device_model",
+        "os_name",
+        "os_version",
+        "profile_id",
+        "windows_aid",
+        "app_build_number",
+        "app_package_name",
+        "app_version_name",
+        "application_id",
+        "stream_window_timestamp",
+    )
+
+    schema = th.PropertiesList(
+        *[th.Property(i, th.StringType) for i in fields] + [th.Property("stream_window_timestamp", th.IntegerType)]
+    ).to_dict()
+
+    def post_process(
+        self,
+        row: dict,
+        context: dict | None = None,
+    ) -> dict | None:
+        row["stream_window_timestamp"] = int(context["stream_window_timestamp"])
+        return row
+
+
+class StreamStatusInstallationsStream(StreamStatusStream):
+    name = "stream_status_installations"
+    stream = "installation"
+
+
+class StreamInstallationsStream(YandexAppmetricaDatastreamStream):
+    name = "stream_installations"
+    parent_stream_type = StreamStatusInstallationsStream
+    ignore_parent_replication_key = False
+    state_partitioning_keys = []
+    replication_key = "stream_window_timestamp"
+    path = "data?data_type={stream}&stream_window_timestamp={stream_window_timestamp}"
+    records_jsonpath = "$.data[*]"
+
+    fields = [
+        "application_id",
+        "click_datetime",
+        "click_id",
+        "click_ipv6",
+        "click_timestamp",
+        "click_url_parameters",
+        "click_user_agent",
+        "profile_id",
+        "publisher_id",
+        "publisher_name",
+        "tracker_name",
+        "tracking_id",
+        "install_datetime",
+        "install_ipv6",
+        "install_receive_datetime",
+        "install_receive_timestamp",
+        "install_timestamp",
+        "is_reattribution",
+        "is_reinstallation",
+        "match_type",
+        "appmetrica_device_id",
+        "city",
+        "connection_type",
+        "country_iso_code",
+        "device_locale",
+        "device_manufacturer",
+        "device_model",
+        "device_type",
+        "google_aid",
+        "ios_ifa",
+        "ios_ifv",
+        "mcc",
+        "mnc",
+        "operator_name",
+        "os_name",
+        "os_version",
+        "windows_aid",
+        "app_package_name",
+        "app_version_name",
+        "stream_window_timestamp",
+    ]
+
+    schema = th.PropertiesList(
+        *[th.Property(i, th.StringType) for i in fields] + [th.Property("stream_window_timestamp", th.IntegerType)]
+    ).to_dict()
+
+    def post_process(
+        self,
+        row: dict,
+        context: dict | None = None,
+    ) -> dict | None:
+        row["stream_window_timestamp"] = int(context["stream_window_timestamp"])
         return row

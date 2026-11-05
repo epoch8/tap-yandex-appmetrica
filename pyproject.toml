@@ -1,6 +1,6 @@
 [project]
 name = "epoch8-tap-yandex-appmetrica"
-version = "0.0.1"
+version = "0.0.2"
 description = "Singer tap for YandexAppmetrica, built with the Meltano Singer SDK."
 readme = "README.md"
 authors = [{ name = "Sergey Zakharchenko", email = "SergeyZ06@yandex.ru" }]

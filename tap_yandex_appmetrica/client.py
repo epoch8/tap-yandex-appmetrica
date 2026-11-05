@@ -391,3 +391,41 @@ class YandexAppmetricaStatStream(_MonotonicBookmarkMixin, RESTStream):
         """
         # TODO: Delete this method if not needed.
         return row
+
+
+class YandexAppmetricaDatastreamStream(_MonotonicBookmarkMixin, RESTStream):
+    url_base = "https://api.appmetrica.yandex.ru/datastream/v1/application/{application_id}/"
+
+    @property
+    def http_headers(self) -> dict:
+        """Return headers dict to be used for HTTP requests.
+
+        If an authenticator is also specified, the authenticator's headers will be
+        combined with `http_headers` when making HTTP requests.
+
+        Returns:
+            Dictionary of HTTP headers to use as a base for every request.
+        """
+        return {
+            "User-Agent": self.user_agent,
+            **self._http_headers,
+            "Authorization": f"OAuth {self.config['token']}",
+        }
+
+    def get_url_params(
+        self,
+        context: dict | None,
+        next_page_token: Any | None,
+    ) -> dict[str, Any]:
+        """Return a dictionary of values to be used in URL parameterization.
+
+        Args:
+            context: The stream context.
+            next_page_token: The next page index or value.
+
+        Returns:
+            A dictionary of URL query parameters.
+        """
+        return {
+            "application_id": self.config["application_id"],
+        }
